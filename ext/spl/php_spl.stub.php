@@ -53,3 +53,15 @@ function iterator_apply(Traversable $iterator, callable $callback, ?array $args 
 function iterator_count(iterable $iterator): int {}
 
 function iterator_to_array(iterable $iterator, bool $preserve_keys = true): array {}
+
+function iterator_reduce(iterable $iterator, callable $callback, mixed $initial = null): mixed {}
+
+function iterator_any(iterable $iterator, callable $callback): bool {}
+
+function iterator_all(iterable $iterator, callable $callback): bool {}
+
+function iterator_find(iterable $iterator, callable $callback): mixed {}
+
+function iterator_find_key(iterable $iterator, callable $callback): mixed {}
+
+function iterator_first(iterable $iterator): mixed {}

@@ -3137,6 +3137,314 @@ PHP_FUNCTION(iterator_apply)
 }
 /* }}} */
 
+/* Callback for spl_iterable_apply(). Both value and key are borrowed: they are
+ * only guaranteed to be valid for the duration of the call, so an
+ * implementation that keeps either of them must copy it. */
+typedef int (*spl_iterable_apply_func_t)(zval *value, zval *key, void *puser);
+
+typedef struct {
+	spl_iterable_apply_func_t func;
+	void *puser;
+} spl_iterable_apply_info;
+
+static int spl_iterable_apply_traversable(zend_object_iterator *iter, void *puser) /* {{{ */
+{
+	spl_iterable_apply_info *info = puser;
+	zval *data, value, key;
+	int result;
+
+	data = iter->funcs->get_current_data(iter);
+	if (EG(exception) || data == NULL) {
+		return ZEND_HASH_APPLY_STOP;
+	}
+	if (iter->funcs->get_current_key) {
+		iter->funcs->get_current_key(iter, &key);
+		if (EG(exception)) {
+			return ZEND_HASH_APPLY_STOP;
+		}
+	} else {
+		/* Same fallback as foreach. */
+		ZVAL_LONG(&key, iter->index);
+	}
+
+	/* The user callback may advance the iterator (e.g. call next() on a
+	 * generator), which can free the current value. Hold our own reference. */
+	ZVAL_COPY(&value, data);
+	result = info->func(&value, &key, info->puser);
+	zval_ptr_dtor(&value);
+	zval_ptr_dtor(&key);
+
+	return result;
+}
+/* }}} */
+
+/* Calls func(value, key, puser) for each entry of an array or Traversable,
+ * until func returns ZEND_HASH_APPLY_STOP. Returns FAILURE if an exception was
+ * thrown. */
+static zend_result spl_iterable_apply(zval *iterable, spl_iterable_apply_func_t func, void *puser) /* {{{ */
+{
+	if (Z_TYPE_P(iterable) == IS_ARRAY) {
+		zend_ulong num_key;
+		zend_string *str_key;
+		zval *operand, key;
+
+		ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(iterable), num_key, str_key, operand) {
+			if (str_key) {
+				ZVAL_STR(&key, str_key);
+			} else {
+				ZVAL_LONG(&key, num_key);
+			}
+			if (func(operand, &key, puser) == ZEND_HASH_APPLY_STOP) {
+				break;
+			}
+		} ZEND_HASH_FOREACH_END();
+
+		return EG(exception) ? FAILURE : SUCCESS;
+	}
+
+	spl_iterable_apply_info info = { .func = func, .puser = puser };
+	return spl_iterator_apply(iterable, spl_iterable_apply_traversable, &info);
+}
+/* }}} */
+
+typedef struct {
+	zend_fcall_info *fci;
+	zend_fcall_info_cache *fcc;
+	zval *carry;
+} spl_iterable_reduce_info;
+
+static int spl_iterable_reduce_apply(zval *value, zval *key, void *puser) /* {{{ */
+{
+	spl_iterable_reduce_info *info = puser;
+	zval args[2];
+
+	ZEND_IGNORE_VALUE(key);
+
+	/* Same calling convention as array_reduce(): the carry is passed as a
+	 * consumed argument, so the callback may modify it in place. */
+	ZVAL_COPY_VALUE(&args[0], info->carry);
+	ZVAL_COPY_VALUE(&args[1], value);
+	info->fci->retval = info->carry;
+	info->fci->param_count = 2;
+	info->fci->params = args;
+	info->fci->consumed_args = zend_fci_consumed_arg(0);
+
+	zend_call_function(info->fci, info->fcc);
+	zval_ptr_dtor(&args[0]);
+
+	if (UNEXPECTED(Z_ISUNDEF_P(info->carry))) {
+		ZVAL_NULL(info->carry);
+		return ZEND_HASH_APPLY_STOP;
+	}
+	if (UNEXPECTED(Z_ISREF_P(info->carry))) {
+		zend_unwrap_reference(info->carry);
+	}
+	return ZEND_HASH_APPLY_KEEP;
+}
+/* }}} */
+
+/* {{{ Iteratively reduce the iterable to a single value using a callback function */
+PHP_FUNCTION(iterator_reduce)
+{
+	zval *iterable;
+	zend_fcall_info fci;
+	zend_fcall_info_cache fcc;
+	zval *initial = NULL;
+
+	ZEND_PARSE_PARAMETERS_START(2, 3)
+		Z_PARAM_ITERABLE(iterable)
+		Z_PARAM_FUNC(fci, fcc)
+		Z_PARAM_OPTIONAL
+		Z_PARAM_ZVAL(initial)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (initial) {
+		ZVAL_COPY(return_value, initial);
+	} else {
+		ZVAL_NULL(return_value);
+	}
+
+	spl_iterable_reduce_info info = { .fci = &fci, .fcc = &fcc, .carry = return_value };
+	if (spl_iterable_apply(iterable, spl_iterable_reduce_apply, &info) == FAILURE) {
+		zval_ptr_dtor(return_value);
+		ZVAL_UNDEF(return_value);
+		RETURN_THROWS();
+	}
+}
+/* }}} */
+
+typedef struct {
+	zend_fcall_info_cache *fcc;
+	zval *result_key;
+	zval *result_value;
+	bool negate_condition;
+	bool found;
+} spl_iterable_find_info;
+
+static int spl_iterable_find_apply(zval *value, zval *key, void *puser) /* {{{ */
+{
+	spl_iterable_find_info *info = puser;
+	zval args[2], retval;
+	bool matches;
+
+	/* Same arguments as array_find(): ($value, $key). */
+	ZVAL_COPY_VALUE(&args[0], value);
+	ZVAL_COPY_VALUE(&args[1], key);
+	zend_call_known_fcc(info->fcc, &retval, 2, args, NULL);
+
+	if (UNEXPECTED(Z_ISUNDEF(retval))) {
+		return ZEND_HASH_APPLY_STOP;
+	}
+	matches = zend_is_true(&retval);
+	zval_ptr_dtor(&retval);
+
+	if (matches ^ info->negate_condition) {
+		info->found = true;
+		if (info->result_value) {
+			ZVAL_COPY_DEREF(info->result_value, value);
+		}
+		if (info->result_key) {
+			ZVAL_COPY_DEREF(info->result_key, key);
+		}
+		return ZEND_HASH_APPLY_STOP;
+	}
+	return ZEND_HASH_APPLY_KEEP;
+}
+/* }}} */
+
+/* Returns whether an entry for which the callback result (xor negate_condition)
+ * is true was found, or FAILURE via *result if an exception was thrown. */
+static zend_result spl_iterable_find(zval *iterable, zend_fcall_info_cache *fcc, zval *result_key, zval *result_value, bool negate_condition, bool *found) /* {{{ */
+{
+	spl_iterable_find_info info = {
+		.fcc = fcc,
+		.result_key = result_key,
+		.result_value = result_value,
+		.negate_condition = negate_condition,
+		.found = false,
+	};
+	zend_result result = spl_iterable_apply(iterable, spl_iterable_find_apply, &info);
+
+	*found = info.found;
+	return result;
+}
+/* }}} */
+
+/* {{{ Return the value of the first entry for which the callback returns true */
+PHP_FUNCTION(iterator_find)
+{
+	zval *iterable;
+	zend_fcall_info fci;
+	zend_fcall_info_cache fcc;
+	bool found;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_ITERABLE(iterable)
+		Z_PARAM_FUNC_NO_TRAMPOLINE_FREE(fci, fcc)
+	ZEND_PARSE_PARAMETERS_END();
+
+	zend_result result = spl_iterable_find(iterable, &fcc, NULL, return_value, false, &found);
+	zend_release_fcall_info_cache(&fcc);
+	if (result == FAILURE) {
+		zval_ptr_dtor(return_value);
+		ZVAL_UNDEF(return_value);
+		RETURN_THROWS();
+	}
+}
+/* }}} */
+
+/* {{{ Return the key of the first entry for which the callback returns true */
+PHP_FUNCTION(iterator_find_key)
+{
+	zval *iterable;
+	zend_fcall_info fci;
+	zend_fcall_info_cache fcc;
+	bool found;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_ITERABLE(iterable)
+		Z_PARAM_FUNC_NO_TRAMPOLINE_FREE(fci, fcc)
+	ZEND_PARSE_PARAMETERS_END();
+
+	zend_result result = spl_iterable_find(iterable, &fcc, return_value, NULL, false, &found);
+	zend_release_fcall_info_cache(&fcc);
+	if (result == FAILURE) {
+		zval_ptr_dtor(return_value);
+		ZVAL_UNDEF(return_value);
+		RETURN_THROWS();
+	}
+}
+/* }}} */
+
+/* {{{ Check whether the callback returns true for at least one entry */
+PHP_FUNCTION(iterator_any)
+{
+	zval *iterable;
+	zend_fcall_info fci;
+	zend_fcall_info_cache fcc;
+	bool found;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_ITERABLE(iterable)
+		Z_PARAM_FUNC_NO_TRAMPOLINE_FREE(fci, fcc)
+	ZEND_PARSE_PARAMETERS_END();
+
+	zend_result result = spl_iterable_find(iterable, &fcc, NULL, NULL, false, &found);
+	zend_release_fcall_info_cache(&fcc);
+	if (result == FAILURE) {
+		RETURN_THROWS();
+	}
+	RETURN_BOOL(found);
+}
+/* }}} */
+
+/* {{{ Check whether the callback returns true for every entry */
+PHP_FUNCTION(iterator_all)
+{
+	zval *iterable;
+	zend_fcall_info fci;
+	zend_fcall_info_cache fcc;
+	bool found;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_ITERABLE(iterable)
+		Z_PARAM_FUNC_NO_TRAMPOLINE_FREE(fci, fcc)
+	ZEND_PARSE_PARAMETERS_END();
+
+	zend_result result = spl_iterable_find(iterable, &fcc, NULL, NULL, true, &found);
+	zend_release_fcall_info_cache(&fcc);
+	if (result == FAILURE) {
+		RETURN_THROWS();
+	}
+	RETURN_BOOL(!found);
+}
+/* }}} */
+
+static int spl_iterable_first_apply(zval *value, zval *key, void *puser) /* {{{ */
+{
+	ZEND_IGNORE_VALUE(key);
+	ZVAL_COPY_DEREF((zval *) puser, value);
+	return ZEND_HASH_APPLY_STOP;
+}
+/* }}} */
+
+/* {{{ Return the first value of the iterable, or null if it is empty */
+PHP_FUNCTION(iterator_first)
+{
+	zval *iterable;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_ITERABLE(iterable)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (spl_iterable_apply(iterable, spl_iterable_first_apply, return_value) == FAILURE) {
+		zval_ptr_dtor(return_value);
+		ZVAL_UNDEF(return_value);
+		RETURN_THROWS();
+	}
+}
+/* }}} */
+
 /* {{{ PHP_MINIT_FUNCTION(spl_iterators) */
 PHP_MINIT_FUNCTION(spl_iterators)
 {

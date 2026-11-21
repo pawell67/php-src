@@ -1,5 +1,5 @@
 /* This is a generated file, edit php_spl.stub.php instead.
- * Stub hash: 5f9f72a101d08dc67472461115b90534d4805ddc */
+ * Stub hash: 4a6f0503f40e6a02636aac8366910b51b9699ab0 */
 
 #include "zend_attributes.h"
 
@@ -63,6 +63,30 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_iterator_to_array, 0, 1, IS_ARRA
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, preserve_keys, _IS_BOOL, 0, "true")
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_iterator_reduce, 0, 2, IS_MIXED, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, iterator, Traversable, MAY_BE_ARRAY, NULL)
+	ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, initial, IS_MIXED, 0, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_iterator_any, 0, 2, _IS_BOOL, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, iterator, Traversable, MAY_BE_ARRAY, NULL)
+	ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_iterator_all arginfo_iterator_any
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_iterator_find, 0, 2, IS_MIXED, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, iterator, Traversable, MAY_BE_ARRAY, NULL)
+	ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_iterator_find_key arginfo_iterator_find
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_iterator_first, 0, 1, IS_MIXED, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, iterator, Traversable, MAY_BE_ARRAY, NULL)
+ZEND_END_ARG_INFO()
+
 ZEND_FUNCTION(class_implements);
 ZEND_FUNCTION(class_parents);
 ZEND_FUNCTION(class_uses);
@@ -78,6 +102,12 @@ ZEND_FUNCTION(spl_object_id);
 ZEND_FUNCTION(iterator_apply);
 ZEND_FUNCTION(iterator_count);
 ZEND_FUNCTION(iterator_to_array);
+ZEND_FUNCTION(iterator_reduce);
+ZEND_FUNCTION(iterator_any);
+ZEND_FUNCTION(iterator_all);
+ZEND_FUNCTION(iterator_find);
+ZEND_FUNCTION(iterator_find_key);
+ZEND_FUNCTION(iterator_first);
 
 static const zend_function_entry ext_functions[] = {
 	ZEND_FE(class_implements, arginfo_class_implements)
@@ -95,6 +125,12 @@ static const zend_function_entry ext_functions[] = {
 	ZEND_FE(iterator_apply, arginfo_iterator_apply)
 	ZEND_FE(iterator_count, arginfo_iterator_count)
 	ZEND_FE(iterator_to_array, arginfo_iterator_to_array)
+	ZEND_FE(iterator_reduce, arginfo_iterator_reduce)
+	ZEND_FE(iterator_any, arginfo_iterator_any)
+	ZEND_FE(iterator_all, arginfo_iterator_all)
+	ZEND_FE(iterator_find, arginfo_iterator_find)
+	ZEND_FE(iterator_find_key, arginfo_iterator_find_key)
+	ZEND_FE(iterator_first, arginfo_iterator_first)
 	ZEND_FE_END
 };
 
