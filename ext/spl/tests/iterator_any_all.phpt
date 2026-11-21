@@ -27,6 +27,10 @@ var_dump(iterator_all([], fn () => false));
 var_dump(iterator_any(new EmptyIterator(), fn () => true));
 var_dump(iterator_all(new EmptyIterator(), fn () => false));
 
+echo "-- the callback may return any value, which is converted to bool\n";
+$truthy = fn ($v) => $v > 1 ? str_repeat('y', 3) : [];
+var_dump(iterator_any([1, 2], $truthy), iterator_all([1, 2], $truthy), iterator_all([2, 3], $truthy));
+
 ?>
 --EXPECT--
 pull 1
@@ -44,6 +48,10 @@ bool(true)
 bool(false)
 -- empty input
 bool(false)
+bool(true)
+bool(false)
+bool(true)
+-- the callback may return any value, which is converted to bool
 bool(true)
 bool(false)
 bool(true)

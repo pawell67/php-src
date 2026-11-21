@@ -3275,6 +3275,24 @@ PHP_FUNCTION(iterator_reduce)
 }
 /* }}} */
 
+/* Returns whether a callback result is truthy and releases it. Callbacks
+ * usually return a bool, which needs neither conversion nor release (same as
+ * php_is_true() in ext/standard/array.c). */
+static zend_always_inline bool spl_callback_result_is_true(zval *retval)
+{
+	switch (Z_TYPE_P(retval)) {
+		case IS_TRUE:
+			return true;
+		case IS_FALSE:
+			return false;
+		default: {
+			bool result = zend_is_true(retval);
+			zval_ptr_dtor(retval);
+			return result;
+		}
+	}
+}
+
 typedef struct {
 	zend_fcall_info_cache *fcc;
 	zval *result_key;
@@ -3297,8 +3315,7 @@ static int spl_iterable_find_apply(zval *value, zval *key, void *puser) /* {{{ *
 	if (UNEXPECTED(Z_ISUNDEF(retval))) {
 		return ZEND_HASH_APPLY_STOP;
 	}
-	matches = zend_is_true(&retval);
-	zval_ptr_dtor(&retval);
+	matches = spl_callback_result_is_true(&retval);
 
 	if (matches ^ info->negate_condition) {
 		info->found = true;
@@ -3703,9 +3720,7 @@ static bool spl_lazy_iterator_accepts(spl_lazy_iterator *intern, zval *value, zv
 	if (Z_ISUNDEF(retval)) {
 		return false;
 	}
-	bool accepted = zend_is_true(&retval);
-	zval_ptr_dtor(&retval);
-	return accepted;
+	return spl_callback_result_is_true(&retval);
 }
 /* }}} */
 

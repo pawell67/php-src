@@ -40,6 +40,10 @@ $found = iterator_find($data, fn () => true);
 $found++;
 var_dump($x);
 
+echo "-- the callback may return any value, which is converted to bool\n";
+$truthy = fn ($v) => $v > 1 ? str_repeat('y', 3) : [];
+var_dump(iterator_find([1, 2, 3], $truthy), iterator_find_key([1, 2, 3], $truthy));
+
 ?>
 --EXPECTF--
 pull 1
@@ -69,4 +73,7 @@ object(ArrayObject)#%d (1) {
   }
 }
 -- values are returned dereferenced
+int(1)
+-- the callback may return any value, which is converted to bool
+int(2)
 int(1)
