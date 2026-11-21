@@ -3141,12 +3141,14 @@ PHP_FUNCTION(iterator_apply)
 
 /* Callback for spl_iterable_apply(). Both value and key are borrowed: they are
  * only guaranteed to be valid for the duration of the call, so an
- * implementation that keeps either of them must copy it. */
+ * implementation that keeps either of them must copy it. The key is UNDEF if
+ * it was not requested. */
 typedef int (*spl_iterable_apply_func_t)(zval *value, zval *key, void *puser);
 
 typedef struct {
 	spl_iterable_apply_func_t func;
 	void *puser;
+	bool need_key;
 } spl_iterable_apply_info;
 
 static int spl_iterable_apply_traversable(zend_object_iterator *iter, void *puser) /* {{{ */
@@ -3159,7 +3161,10 @@ static int spl_iterable_apply_traversable(zend_object_iterator *iter, void *puse
 	if (EG(exception) || data == NULL) {
 		return ZEND_HASH_APPLY_STOP;
 	}
-	if (iter->funcs->get_current_key) {
+	if (!info->need_key) {
+		/* Like foreach without a key variable: do not call key(). */
+		ZVAL_UNDEF(&key);
+	} else if (iter->funcs->get_current_key) {
 		iter->funcs->get_current_key(iter, &key);
 		if (EG(exception)) {
 			return ZEND_HASH_APPLY_STOP;
@@ -3181,9 +3186,10 @@ static int spl_iterable_apply_traversable(zend_object_iterator *iter, void *puse
 /* }}} */
 
 /* Calls func(value, key, puser) for each entry of an array or Traversable,
- * until func returns ZEND_HASH_APPLY_STOP. Returns FAILURE if an exception was
- * thrown. */
-static zend_result spl_iterable_apply(zval *iterable, spl_iterable_apply_func_t func, void *puser) /* {{{ */
+ * until func returns ZEND_HASH_APPLY_STOP. Without need_key, the key of a
+ * Traversable is not fetched and is passed as UNDEF. Returns FAILURE if an
+ * exception was thrown. */
+static zend_result spl_iterable_apply(zval *iterable, spl_iterable_apply_func_t func, void *puser, bool need_key) /* {{{ */
 {
 	if (Z_TYPE_P(iterable) == IS_ARRAY) {
 		zend_ulong num_key;
@@ -3204,7 +3210,7 @@ static zend_result spl_iterable_apply(zval *iterable, spl_iterable_apply_func_t 
 		return EG(exception) ? FAILURE : SUCCESS;
 	}
 
-	spl_iterable_apply_info info = { .func = func, .puser = puser };
+	spl_iterable_apply_info info = { .func = func, .puser = puser, .need_key = need_key };
 	return spl_iterator_apply(iterable, spl_iterable_apply_traversable, &info);
 }
 /* }}} */
@@ -3267,7 +3273,7 @@ PHP_FUNCTION(iterator_reduce)
 	}
 
 	spl_iterable_reduce_info info = { .fci = &fci, .fcc = &fcc, .carry = return_value };
-	if (spl_iterable_apply(iterable, spl_iterable_reduce_apply, &info) == FAILURE) {
+	if (spl_iterable_apply(iterable, spl_iterable_reduce_apply, &info, false) == FAILURE) {
 		zval_ptr_dtor(return_value);
 		ZVAL_UNDEF(return_value);
 		RETURN_THROWS();
@@ -3342,7 +3348,7 @@ static zend_result spl_iterable_find(zval *iterable, zend_fcall_info_cache *fcc,
 		.negate_condition = negate_condition,
 		.found = false,
 	};
-	zend_result result = spl_iterable_apply(iterable, spl_iterable_find_apply, &info);
+	zend_result result = spl_iterable_apply(iterable, spl_iterable_find_apply, &info, true);
 
 	*found = info.found;
 	return result;
@@ -3456,7 +3462,7 @@ PHP_FUNCTION(iterator_first)
 		Z_PARAM_ITERABLE(iterable)
 	ZEND_PARSE_PARAMETERS_END();
 
-	if (spl_iterable_apply(iterable, spl_iterable_first_apply, return_value) == FAILURE) {
+	if (spl_iterable_apply(iterable, spl_iterable_first_apply, return_value, false) == FAILURE) {
 		zval_ptr_dtor(return_value);
 		ZVAL_UNDEF(return_value);
 		RETURN_THROWS();
@@ -3643,8 +3649,10 @@ static void spl_lazy_source_next(spl_lazy_iterator *intern) /* {{{ */
 /* }}} */
 
 /* Fetches the entry the source is positioned on into value and key, both owned
- * by the caller. Returns false at the end of the source or if an exception was
- * thrown, leaving value and key UNDEF. */
+ * by the caller. The key of a Traversable is fetched only for kinds that use
+ * it, as by the foreach of the polyfill; otherwise it is left UNDEF. Returns
+ * false at the end of the source or if an exception was thrown, leaving value
+ * and key UNDEF. */
 static bool spl_lazy_source_fetch(spl_lazy_iterator *intern, zval *value, zval *key) /* {{{ */
 {
 	zval *data;
@@ -3674,6 +3682,9 @@ static bool spl_lazy_source_fetch(spl_lazy_iterator *intern, zval *value, zval *
 	/* Our own copy: fetching the key or calling a callback may advance the
 	 * source and release its current value. */
 	ZVAL_COPY_DEREF(value, data);
+	if (intern->kind == SPL_LAZY_VALUES) {
+		return true;
+	}
 	if (iter->funcs->get_current_key) {
 		iter->funcs->get_current_key(iter, key);
 		if (EG(exception)) {
