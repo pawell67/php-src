@@ -54,6 +54,16 @@ function iterator_count(iterable $iterator): int {}
 
 function iterator_to_array(iterable $iterator, bool $preserve_keys = true): array {}
 
+function iterator_map(iterable $iterator, callable $callback): Iterator {}
+
+function iterator_filter(iterable $iterator, ?callable $callback = null, int $mode = ARRAY_FILTER_USE_VALUE): Iterator {}
+
+function iterator_slice(iterable $iterator, int $offset, ?int $length = null): Iterator {}
+
+function iterator_keys(iterable $iterator): Iterator {}
+
+function iterator_values(iterable $iterator): Iterator {}
+
 function iterator_reduce(iterable $iterator, callable $callback, mixed $initial = null): mixed {}
 
 function iterator_any(iterable $iterator, callable $callback): bool {}

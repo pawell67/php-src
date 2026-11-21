@@ -450,3 +450,25 @@ class RecursiveTreeIterator extends RecursiveIteratorIterator
     /** @tentative-return-type */
     public function getPostfix(): string {}
 }
+
+/**
+ * Returned by the lazy iterator_* functions: iterator_map(), iterator_filter(),
+ * iterator_slice(), iterator_keys() and iterator_values().
+ *
+ * @strict-properties
+ * @not-serializable
+ */
+final class LazyIterator implements Iterator
+{
+    private function __construct() {}
+
+    public function current(): mixed {}
+
+    public function key(): mixed {}
+
+    public function next(): void {}
+
+    public function valid(): bool {}
+
+    public function rewind(): void {}
+}

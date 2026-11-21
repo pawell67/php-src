@@ -1,5 +1,5 @@
 /* This is a generated file, edit spl_iterators.stub.php instead.
- * Stub hash: ab66d2fff7ac7556d4244582a2bd3e83a3f95243 */
+ * Stub hash: be2709e093d3dd6cab8795d70215036691c55d10 */
 
 ZEND_BEGIN_ARG_WITH_TENTATIVE_RETURN_TYPE_INFO_EX(arginfo_class_EmptyIterator_current, 0, 0, IS_NEVER, 0)
 ZEND_END_ARG_INFO()
@@ -311,6 +311,21 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_RecursiveTreeIterator_getPostfix arginfo_class_RegexIterator_getRegex
 
+#define arginfo_class_LazyIterator___construct arginfo_class_AppendIterator___construct
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_LazyIterator_current, 0, 0, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_LazyIterator_key arginfo_class_LazyIterator_current
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_LazyIterator_next, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_LazyIterator_valid, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_LazyIterator_rewind arginfo_class_LazyIterator_next
+
 ZEND_METHOD(EmptyIterator, current);
 ZEND_METHOD(EmptyIterator, next);
 ZEND_METHOD(EmptyIterator, key);
@@ -411,6 +426,12 @@ ZEND_METHOD(RecursiveTreeIterator, setPostfix);
 ZEND_METHOD(RecursiveTreeIterator, setPrefixPart);
 ZEND_METHOD(RecursiveTreeIterator, getEntry);
 ZEND_METHOD(RecursiveTreeIterator, getPostfix);
+ZEND_METHOD(LazyIterator, __construct);
+ZEND_METHOD(LazyIterator, current);
+ZEND_METHOD(LazyIterator, key);
+ZEND_METHOD(LazyIterator, next);
+ZEND_METHOD(LazyIterator, valid);
+ZEND_METHOD(LazyIterator, rewind);
 
 static const zend_function_entry class_EmptyIterator_methods[] = {
 	ZEND_ME(EmptyIterator, current, arginfo_class_EmptyIterator_current, ZEND_ACC_PUBLIC)
@@ -597,6 +618,16 @@ static const zend_function_entry class_RecursiveTreeIterator_methods[] = {
 	ZEND_ME(RecursiveTreeIterator, setPrefixPart, arginfo_class_RecursiveTreeIterator_setPrefixPart, ZEND_ACC_PUBLIC)
 	ZEND_ME(RecursiveTreeIterator, getEntry, arginfo_class_RecursiveTreeIterator_getEntry, ZEND_ACC_PUBLIC)
 	ZEND_ME(RecursiveTreeIterator, getPostfix, arginfo_class_RecursiveTreeIterator_getPostfix, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_LazyIterator_methods[] = {
+	ZEND_ME(LazyIterator, __construct, arginfo_class_LazyIterator___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(LazyIterator, current, arginfo_class_LazyIterator_current, ZEND_ACC_PUBLIC)
+	ZEND_ME(LazyIterator, key, arginfo_class_LazyIterator_key, ZEND_ACC_PUBLIC)
+	ZEND_ME(LazyIterator, next, arginfo_class_LazyIterator_next, ZEND_ACC_PUBLIC)
+	ZEND_ME(LazyIterator, valid, arginfo_class_LazyIterator_valid, ZEND_ACC_PUBLIC)
+	ZEND_ME(LazyIterator, rewind, arginfo_class_LazyIterator_rewind, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -963,6 +994,17 @@ static zend_class_entry *register_class_RecursiveTreeIterator(zend_class_entry *
 	zend_string *const_PREFIX_RIGHT_name = zend_string_init_interned("PREFIX_RIGHT", sizeof("PREFIX_RIGHT") - 1, true);
 	zend_declare_typed_class_constant(class_entry, const_PREFIX_RIGHT_name, &const_PREFIX_RIGHT_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_LONG));
 	zend_string_release_ex(const_PREFIX_RIGHT_name, true);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_LazyIterator(zend_class_entry *class_entry_Iterator)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_CLASS_ENTRY(ce, "LazyIterator", class_LazyIterator_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
+	zend_class_implements(class_entry, 1, class_entry_Iterator);
 
 	return class_entry;
 }

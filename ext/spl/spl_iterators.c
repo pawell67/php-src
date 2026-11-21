@@ -26,6 +26,7 @@
 #include "spl_array.h" /* For spl_ce_ArrayIterator */
 #include "spl_exceptions.h"
 #include "zend_smart_str.h"
+#include "ext/standard/php_array.h" /* For ARRAY_FILTER_USE_* */
 
 #ifdef accept
 #undef accept
@@ -39,6 +40,7 @@ PHPAPI zend_class_entry *spl_ce_RecursiveFilterIterator;
 PHPAPI zend_class_entry *spl_ce_RecursiveCallbackFilterIterator;
 PHPAPI zend_class_entry *spl_ce_ParentIterator;
 PHPAPI zend_class_entry *spl_ce_SeekableIterator;
+PHPAPI zend_class_entry *spl_ce_LazyIterator;
 PHPAPI zend_class_entry *spl_ce_LimitIterator;
 PHPAPI zend_class_entry *spl_ce_CachingIterator;
 PHPAPI zend_class_entry *spl_ce_RecursiveCachingIterator;
@@ -3445,6 +3447,679 @@ PHP_FUNCTION(iterator_first)
 }
 /* }}} */
 
+/* {{{ LazyIterator: the iterator returned by the lazy iterator_* functions.
+ *
+ * It behaves like a generator wrapping a foreach over the source, which is how
+ * the userland polyfill implements these functions:
+ *  - nothing is pulled from the source before the first rewind(), valid(),
+ *    current(), key() or next() call (getIterator() of an IteratorAggregate
+ *    is not called before that either);
+ *  - it can only be rewound before the first next();
+ *  - an exception thrown by the source (or a callback) ends the iteration;
+ *  - once the iteration has ended, the source is released. */
+
+typedef enum {
+	SPL_LAZY_VALUES,
+	SPL_LAZY_KEYS,
+	SPL_LAZY_MAP,
+	SPL_LAZY_FILTER,
+	SPL_LAZY_SLICE,
+} spl_lazy_kind;
+
+typedef struct {
+	/* Array or Traversable; UNDEF once the iteration has ended. */
+	zval source;
+	/* Iterator over a Traversable source, created when the iteration starts. */
+	zend_object_iterator *inner;
+	/* Position in an array source. The array cannot change under us: we hold a
+	 * reference to it, so any write elsewhere separates it first. */
+	HashPosition pos;
+	/* Current entry; UNDEF while being computed and once the iteration has ended. */
+	zval value;
+	zval key;
+	/* Number of entries produced before the current one. */
+	zend_long position;
+	/* Callback of iterator_map() and iterator_filter(); not initialized for
+	 * iterator_filter() without a callback. Released when the iteration ends. */
+	zend_fcall_info_cache fcc;
+	/* ARRAY_FILTER_USE_* mode of iterator_filter(). */
+	zend_long filter_mode;
+	/* iterator_slice(): entries to skip, entries to produce (-1: all) and
+	 * entries skipped so far. */
+	zend_long slice_offset;
+	zend_long slice_length;
+	zend_long slice_skipped;
+	spl_lazy_kind kind;
+	bool started;
+	/* next() has moved past the first entry, so rewinding is no longer possible. */
+	bool advanced;
+	bool finished;
+	/* Guards against next() being called from within the iteration itself. */
+	bool running;
+	zend_object std;
+} spl_lazy_iterator;
+
+static zend_object_handlers spl_handlers_lazy_iterator;
+
+static zend_always_inline spl_lazy_iterator *spl_lazy_iterator_from_obj(zend_object *obj)
+{
+	return (spl_lazy_iterator *) ((char *) obj - offsetof(spl_lazy_iterator, std));
+}
+
+static zend_object *spl_lazy_iterator_new(zend_class_entry *ce) /* {{{ */
+{
+	spl_lazy_iterator *intern = zend_object_alloc(sizeof(spl_lazy_iterator), ce);
+
+	ZVAL_UNDEF(&intern->source);
+	intern->inner = NULL;
+	intern->pos = 0;
+	ZVAL_UNDEF(&intern->value);
+	ZVAL_UNDEF(&intern->key);
+	intern->position = 0;
+	intern->fcc = empty_fcall_info_cache;
+	intern->filter_mode = ARRAY_FILTER_USE_VALUE;
+	intern->slice_offset = 0;
+	intern->slice_length = -1;
+	intern->slice_skipped = 0;
+	intern->kind = SPL_LAZY_VALUES;
+	/* Until a lazy iterator_* function fills it in, the object is an empty
+	 * iterator. It cannot be created any other way, but be safe. */
+	intern->started = true;
+	intern->advanced = false;
+	intern->finished = true;
+	intern->running = false;
+
+	zend_object_std_init(&intern->std, ce);
+	return &intern->std;
+}
+/* }}} */
+
+static void spl_lazy_iterator_clear_entry(spl_lazy_iterator *intern) /* {{{ */
+{
+	zval_ptr_dtor(&intern->value);
+	ZVAL_UNDEF(&intern->value);
+	zval_ptr_dtor(&intern->key);
+	ZVAL_UNDEF(&intern->key);
+}
+/* }}} */
+
+/* Ends the iteration and releases everything it holds, like a generator that
+ * returns. Releasing the source may run destructors or finally blocks, which
+ * may throw. */
+static void spl_lazy_iterator_finish(spl_lazy_iterator *intern) /* {{{ */
+{
+	intern->finished = true;
+	spl_lazy_iterator_clear_entry(intern);
+	if (intern->inner) {
+		zend_object_iterator *inner = intern->inner;
+		intern->inner = NULL;
+		zend_iterator_dtor(inner);
+	}
+	zval_ptr_dtor(&intern->source);
+	ZVAL_UNDEF(&intern->source);
+	if (ZEND_FCC_INITIALIZED(intern->fcc)) {
+		zend_fcc_dtor(&intern->fcc);
+	}
+}
+/* }}} */
+
+static void spl_lazy_iterator_free(zend_object *obj) /* {{{ */
+{
+	spl_lazy_iterator *intern = spl_lazy_iterator_from_obj(obj);
+
+	spl_lazy_iterator_finish(intern);
+	zend_object_std_dtor(&intern->std);
+}
+/* }}} */
+
+static HashTable *spl_lazy_iterator_get_gc(zend_object *obj, zval **table, int *n) /* {{{ */
+{
+	spl_lazy_iterator *intern = spl_lazy_iterator_from_obj(obj);
+	zend_get_gc_buffer *gc_buffer = zend_get_gc_buffer_create();
+
+	zend_get_gc_buffer_add_zval(gc_buffer, &intern->source);
+	if (intern->inner) {
+		zend_get_gc_buffer_add_obj(gc_buffer, &intern->inner->std);
+	}
+	zend_get_gc_buffer_add_zval(gc_buffer, &intern->value);
+	zend_get_gc_buffer_add_zval(gc_buffer, &intern->key);
+	if (ZEND_FCC_INITIALIZED(intern->fcc)) {
+		zend_get_gc_buffer_add_fcc(gc_buffer, &intern->fcc);
+	}
+
+	zend_get_gc_buffer_use(gc_buffer, table, n);
+	return NULL;
+}
+/* }}} */
+
+/* Positions the source on its first entry. */
+static void spl_lazy_source_rewind(spl_lazy_iterator *intern) /* {{{ */
+{
+	if (Z_TYPE(intern->source) == IS_ARRAY) {
+		zend_hash_internal_pointer_reset_ex(Z_ARRVAL(intern->source), &intern->pos);
+		return;
+	}
+
+	zend_class_entry *ce = Z_OBJCE(intern->source);
+	intern->inner = ce->get_iterator(ce, &intern->source, 0);
+	if (!intern->inner || EG(exception)) {
+		return;
+	}
+	intern->inner->index = 0;
+	if (intern->inner->funcs->rewind) {
+		intern->inner->funcs->rewind(intern->inner);
+	}
+}
+/* }}} */
+
+/* Moves the source to its next entry. */
+static void spl_lazy_source_next(spl_lazy_iterator *intern) /* {{{ */
+{
+	if (Z_TYPE(intern->source) == IS_ARRAY) {
+		zend_hash_move_forward_ex(Z_ARRVAL(intern->source), &intern->pos);
+		return;
+	}
+
+	intern->inner->index++;
+	intern->inner->funcs->move_forward(intern->inner);
+}
+/* }}} */
+
+/* Fetches the entry the source is positioned on into value and key, both owned
+ * by the caller. Returns false at the end of the source or if an exception was
+ * thrown, leaving value and key UNDEF. */
+static bool spl_lazy_source_fetch(spl_lazy_iterator *intern, zval *value, zval *key) /* {{{ */
+{
+	zval *data;
+
+	ZVAL_UNDEF(value);
+	ZVAL_UNDEF(key);
+
+	if (Z_TYPE(intern->source) == IS_ARRAY) {
+		HashTable *ht = Z_ARRVAL(intern->source);
+		data = zend_hash_get_current_data_ex(ht, &intern->pos);
+		if (!data) {
+			return false;
+		}
+		ZVAL_COPY_DEREF(value, data);
+		zend_hash_get_current_key_zval_ex(ht, key, &intern->pos);
+		return true;
+	}
+
+	zend_object_iterator *iter = intern->inner;
+	if (iter->funcs->valid(iter) == FAILURE || EG(exception)) {
+		return false;
+	}
+	data = iter->funcs->get_current_data(iter);
+	if (EG(exception) || !data) {
+		return false;
+	}
+	/* Our own copy: fetching the key or calling a callback may advance the
+	 * source and release its current value. */
+	ZVAL_COPY_DEREF(value, data);
+	if (iter->funcs->get_current_key) {
+		iter->funcs->get_current_key(iter, key);
+		if (EG(exception)) {
+			zval_ptr_dtor(value);
+			ZVAL_UNDEF(value);
+			zval_ptr_dtor(key);
+			ZVAL_UNDEF(key);
+			return false;
+		}
+	} else {
+		/* Same fallback as foreach. */
+		ZVAL_LONG(key, iter->index);
+	}
+	return true;
+}
+/* }}} */
+
+/* Calls the iterator_filter() callback (or checks the value when there is
+ * none), with the same arguments as array_filter(). Returns false if the entry
+ * is rejected or an exception was thrown. */
+static bool spl_lazy_iterator_accepts(spl_lazy_iterator *intern, zval *value, zval *key) /* {{{ */
+{
+	if (!ZEND_FCC_INITIALIZED(intern->fcc)) {
+		return zend_is_true(value);
+	}
+
+	zval args[2], retval;
+	uint32_t argc = 1;
+
+	switch (intern->filter_mode) {
+		case ARRAY_FILTER_USE_KEY:
+			ZVAL_COPY_VALUE(&args[0], key);
+			break;
+		case ARRAY_FILTER_USE_BOTH:
+			ZVAL_COPY_VALUE(&args[0], value);
+			ZVAL_COPY_VALUE(&args[1], key);
+			argc = 2;
+			break;
+		default:
+			ZVAL_COPY_VALUE(&args[0], value);
+			break;
+	}
+	zend_call_known_fcc(&intern->fcc, &retval, argc, args, NULL);
+	if (Z_ISUNDEF(retval)) {
+		return false;
+	}
+	bool accepted = zend_is_true(&retval);
+	zval_ptr_dtor(&retval);
+	return accepted;
+}
+/* }}} */
+
+/* Computes the current entry, starting from the source's current position.
+ * Ends the iteration (leaving the entry UNDEF) at the end of the source or if
+ * an exception was thrown. */
+static void spl_lazy_iterator_produce(spl_lazy_iterator *intern) /* {{{ */
+{
+	zval value, key;
+
+	while (spl_lazy_source_fetch(intern, &value, &key)) {
+		switch (intern->kind) {
+			case SPL_LAZY_VALUES:
+				ZVAL_COPY_VALUE(&intern->value, &value);
+				ZVAL_LONG(&intern->key, intern->position);
+				zval_ptr_dtor(&key);
+				return;
+			case SPL_LAZY_KEYS:
+				ZVAL_COPY_VALUE(&intern->value, &key);
+				ZVAL_LONG(&intern->key, intern->position);
+				zval_ptr_dtor(&value);
+				return;
+			case SPL_LAZY_MAP: {
+				/* Same argument as array_map() with a single array. */
+				zval retval;
+				zend_call_known_fcc(&intern->fcc, &retval, 1, &value, NULL);
+				zval_ptr_dtor(&value);
+				if (Z_ISUNDEF(retval)) {
+					zval_ptr_dtor(&key);
+					return;
+				}
+				if (Z_ISREF(retval)) {
+					zend_unwrap_reference(&retval);
+				}
+				ZVAL_COPY_VALUE(&intern->value, &retval);
+				ZVAL_COPY_VALUE(&intern->key, &key);
+				return;
+			}
+			case SPL_LAZY_FILTER:
+				if (spl_lazy_iterator_accepts(intern, &value, &key)) {
+					ZVAL_COPY_VALUE(&intern->value, &value);
+					ZVAL_COPY_VALUE(&intern->key, &key);
+					return;
+				}
+				zval_ptr_dtor(&value);
+				zval_ptr_dtor(&key);
+				if (EG(exception)) {
+					return;
+				}
+				/* Rejected: try the next entry of the source. */
+				spl_lazy_source_next(intern);
+				if (EG(exception)) {
+					return;
+				}
+				break;
+			case SPL_LAZY_SLICE:
+				if (intern->slice_skipped < intern->slice_offset) {
+					/* Skipped entries are still fetched, as by foreach. */
+					intern->slice_skipped++;
+					zval_ptr_dtor(&value);
+					zval_ptr_dtor(&key);
+					spl_lazy_source_next(intern);
+					if (EG(exception)) {
+						return;
+					}
+					break;
+				}
+				ZVAL_COPY_VALUE(&intern->value, &value);
+				ZVAL_COPY_VALUE(&intern->key, &key);
+				return;
+			default:
+				ZEND_UNREACHABLE();
+		}
+	}
+}
+/* }}} */
+
+/* Runs one step of the iteration: starts it (first) or advances it. */
+static void spl_lazy_iterator_step(spl_lazy_iterator *intern, bool first) /* {{{ */
+{
+	intern->running = true;
+	if (first) {
+		if (intern->kind == SPL_LAZY_SLICE && intern->slice_length == 0) {
+			/* Nothing to produce: do not touch the source at all. */
+			spl_lazy_iterator_finish(intern);
+			intern->running = false;
+			return;
+		}
+		spl_lazy_source_rewind(intern);
+	} else {
+		spl_lazy_source_next(intern);
+	}
+	if (!EG(exception)) {
+		spl_lazy_iterator_produce(intern);
+	}
+	if (EG(exception) || Z_ISUNDEF(intern->value)) {
+		spl_lazy_iterator_finish(intern);
+	}
+	intern->running = false;
+}
+/* }}} */
+
+static zend_result spl_lazy_iterator_ensure_started(spl_lazy_iterator *intern) /* {{{ */
+{
+	if (!intern->started) {
+		intern->started = true;
+		spl_lazy_iterator_step(intern, true);
+	}
+	return EG(exception) ? FAILURE : SUCCESS;
+}
+/* }}} */
+
+static void spl_lazy_iterator_next(spl_lazy_iterator *intern) /* {{{ */
+{
+	if (intern->running) {
+		zend_throw_error(NULL, "Cannot resume an already running LazyIterator");
+		return;
+	}
+	if (!intern->started) {
+		/* Like a generator: next() first moves to the first entry. */
+		if (spl_lazy_iterator_ensure_started(intern) == FAILURE) {
+			return;
+		}
+	}
+	if (intern->finished) {
+		return;
+	}
+	intern->advanced = true;
+	intern->position++;
+	if (intern->kind == SPL_LAZY_SLICE && intern->slice_length >= 0 && intern->position >= intern->slice_length) {
+		/* All requested entries were produced: do not pull another one. */
+		intern->running = true;
+		spl_lazy_iterator_finish(intern);
+		intern->running = false;
+		return;
+	}
+	spl_lazy_iterator_clear_entry(intern);
+	spl_lazy_iterator_step(intern, false);
+}
+/* }}} */
+
+static void spl_lazy_iterator_rewind(spl_lazy_iterator *intern) /* {{{ */
+{
+	if (spl_lazy_iterator_ensure_started(intern) == FAILURE) {
+		return;
+	}
+	if (intern->advanced) {
+		zend_throw_exception(NULL, "Cannot rewind a LazyIterator that was already run", 0);
+	}
+}
+/* }}} */
+
+/* {{{ foreach support, without going through the PHP methods */
+static void spl_lazy_iterator_it_dtor(zend_object_iterator *iter)
+{
+	zval_ptr_dtor(&iter->data);
+}
+
+static zend_result spl_lazy_iterator_it_valid(zend_object_iterator *iter)
+{
+	spl_lazy_iterator *intern = spl_lazy_iterator_from_obj(Z_OBJ(iter->data));
+
+	if (spl_lazy_iterator_ensure_started(intern) == FAILURE) {
+		return FAILURE;
+	}
+	return intern->finished ? FAILURE : SUCCESS;
+}
+
+static zval *spl_lazy_iterator_it_get_current_data(zend_object_iterator *iter)
+{
+	spl_lazy_iterator *intern = spl_lazy_iterator_from_obj(Z_OBJ(iter->data));
+
+	if (spl_lazy_iterator_ensure_started(intern) == FAILURE || Z_ISUNDEF(intern->value)) {
+		return NULL;
+	}
+	return &intern->value;
+}
+
+static void spl_lazy_iterator_it_get_current_key(zend_object_iterator *iter, zval *key)
+{
+	spl_lazy_iterator *intern = spl_lazy_iterator_from_obj(Z_OBJ(iter->data));
+
+	if (spl_lazy_iterator_ensure_started(intern) == FAILURE || Z_ISUNDEF(intern->key)) {
+		ZVAL_NULL(key);
+		return;
+	}
+	ZVAL_COPY(key, &intern->key);
+}
+
+static void spl_lazy_iterator_it_move_forward(zend_object_iterator *iter)
+{
+	spl_lazy_iterator_next(spl_lazy_iterator_from_obj(Z_OBJ(iter->data)));
+}
+
+static void spl_lazy_iterator_it_rewind(zend_object_iterator *iter)
+{
+	spl_lazy_iterator_rewind(spl_lazy_iterator_from_obj(Z_OBJ(iter->data)));
+}
+
+static HashTable *spl_lazy_iterator_it_get_gc(zend_object_iterator *iter, zval **table, int *n)
+{
+	*table = &iter->data;
+	*n = 1;
+	return NULL;
+}
+
+static const zend_object_iterator_funcs spl_lazy_iterator_it_funcs = {
+	spl_lazy_iterator_it_dtor,
+	spl_lazy_iterator_it_valid,
+	spl_lazy_iterator_it_get_current_data,
+	spl_lazy_iterator_it_get_current_key,
+	spl_lazy_iterator_it_move_forward,
+	spl_lazy_iterator_it_rewind,
+	NULL,
+	spl_lazy_iterator_it_get_gc,
+};
+
+static zend_object_iterator *spl_lazy_iterator_get_iterator(zend_class_entry *ce, zval *object, int by_ref)
+{
+	if (by_ref) {
+		zend_throw_error(NULL, "An iterator cannot be used with foreach by reference");
+		return NULL;
+	}
+
+	zend_object_iterator *iter = emalloc(sizeof(zend_object_iterator));
+	zend_iterator_init(iter);
+	ZVAL_OBJ_COPY(&iter->data, Z_OBJ_P(object));
+	iter->funcs = &spl_lazy_iterator_it_funcs;
+	return iter;
+}
+/* }}} */
+
+/* {{{ LazyIterator methods */
+ZEND_METHOD(LazyIterator, __construct)
+{
+	zend_throw_error(NULL, "Cannot directly construct LazyIterator, use the iterator_* functions instead");
+}
+
+ZEND_METHOD(LazyIterator, current)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	spl_lazy_iterator *intern = spl_lazy_iterator_from_obj(Z_OBJ_P(ZEND_THIS));
+	if (spl_lazy_iterator_ensure_started(intern) == FAILURE) {
+		RETURN_THROWS();
+	}
+	if (!Z_ISUNDEF(intern->value)) {
+		RETURN_COPY(&intern->value);
+	}
+}
+
+ZEND_METHOD(LazyIterator, key)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	spl_lazy_iterator *intern = spl_lazy_iterator_from_obj(Z_OBJ_P(ZEND_THIS));
+	if (spl_lazy_iterator_ensure_started(intern) == FAILURE) {
+		RETURN_THROWS();
+	}
+	if (!Z_ISUNDEF(intern->key)) {
+		RETURN_COPY(&intern->key);
+	}
+}
+
+ZEND_METHOD(LazyIterator, next)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	spl_lazy_iterator_next(spl_lazy_iterator_from_obj(Z_OBJ_P(ZEND_THIS)));
+}
+
+ZEND_METHOD(LazyIterator, valid)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	spl_lazy_iterator *intern = spl_lazy_iterator_from_obj(Z_OBJ_P(ZEND_THIS));
+	if (spl_lazy_iterator_ensure_started(intern) == FAILURE) {
+		RETURN_THROWS();
+	}
+	RETURN_BOOL(!intern->finished);
+}
+
+ZEND_METHOD(LazyIterator, rewind)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	spl_lazy_iterator_rewind(spl_lazy_iterator_from_obj(Z_OBJ_P(ZEND_THIS)));
+}
+/* }}} */
+
+/* Creates the LazyIterator returned by a lazy iterator_* function. */
+static spl_lazy_iterator *spl_lazy_iterator_init(zval *return_value, zval *iterable, spl_lazy_kind kind) /* {{{ */
+{
+	object_init_ex(return_value, spl_ce_LazyIterator);
+	spl_lazy_iterator *intern = spl_lazy_iterator_from_obj(Z_OBJ_P(return_value));
+
+	ZVAL_COPY(&intern->source, iterable);
+	intern->kind = kind;
+	intern->started = false;
+	intern->finished = false;
+	return intern;
+}
+/* }}} */
+
+/* {{{ Return a lazy iterator applying the callback to every value, preserving keys */
+PHP_FUNCTION(iterator_map)
+{
+	zval *iterable;
+	zend_fcall_info fci;
+	zend_fcall_info_cache fcc;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_ITERABLE(iterable)
+		Z_PARAM_FUNC_NO_TRAMPOLINE_FREE(fci, fcc)
+	ZEND_PARSE_PARAMETERS_END();
+
+	spl_lazy_iterator *intern = spl_lazy_iterator_init(return_value, iterable, SPL_LAZY_MAP);
+	zend_fcc_dup(&intern->fcc, &fcc);
+}
+/* }}} */
+
+/* {{{ Return a lazy iterator over the entries accepted by the callback, preserving keys */
+PHP_FUNCTION(iterator_filter)
+{
+	zval *iterable;
+	zend_fcall_info fci = empty_fcall_info;
+	zend_fcall_info_cache fcc = empty_fcall_info_cache;
+	zend_long mode = ARRAY_FILTER_USE_VALUE;
+
+	ZEND_PARSE_PARAMETERS_START(1, 3)
+		Z_PARAM_ITERABLE(iterable)
+		Z_PARAM_OPTIONAL
+		Z_PARAM_FUNC_NO_TRAMPOLINE_FREE_OR_NULL(fci, fcc)
+		Z_PARAM_LONG(mode)
+	ZEND_PARSE_PARAMETERS_END();
+
+	switch (mode) {
+		case ARRAY_FILTER_USE_VALUE:
+		case ARRAY_FILTER_USE_BOTH:
+		case ARRAY_FILTER_USE_KEY:
+			break;
+		default:
+			if (ZEND_FCC_INITIALIZED(fcc)) {
+				zend_release_fcall_info_cache(&fcc);
+			}
+			zend_argument_value_error(3, "must be one of ARRAY_FILTER_USE_VALUE, ARRAY_FILTER_USE_KEY, or ARRAY_FILTER_USE_BOTH");
+			RETURN_THROWS();
+	}
+
+	spl_lazy_iterator *intern = spl_lazy_iterator_init(return_value, iterable, SPL_LAZY_FILTER);
+	intern->filter_mode = mode;
+	if (ZEND_FCC_INITIALIZED(fcc)) {
+		zend_fcc_dup(&intern->fcc, &fcc);
+	}
+}
+/* }}} */
+
+/* {{{ Return a lazy iterator skipping $offset entries and producing at most $length of the following ones, preserving keys */
+PHP_FUNCTION(iterator_slice)
+{
+	zval *iterable;
+	zend_long offset;
+	zend_long length = 0;
+	bool length_is_null = true;
+
+	ZEND_PARSE_PARAMETERS_START(2, 3)
+		Z_PARAM_ITERABLE(iterable)
+		Z_PARAM_LONG(offset)
+		Z_PARAM_OPTIONAL
+		Z_PARAM_LONG_OR_NULL(length, length_is_null)
+	ZEND_PARSE_PARAMETERS_END();
+
+	/* Negative values would require buffering the whole source. */
+	if (offset < 0) {
+		zend_argument_value_error(2, "must be greater than or equal to 0");
+		RETURN_THROWS();
+	}
+	if (!length_is_null && length < 0) {
+		zend_argument_value_error(3, "must be greater than or equal to 0");
+		RETURN_THROWS();
+	}
+
+	spl_lazy_iterator *intern = spl_lazy_iterator_init(return_value, iterable, SPL_LAZY_SLICE);
+	intern->slice_offset = offset;
+	intern->slice_length = length_is_null ? -1 : length;
+}
+/* }}} */
+
+/* {{{ Return a lazy iterator over the keys of the iterable, as a list */
+PHP_FUNCTION(iterator_keys)
+{
+	zval *iterable;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_ITERABLE(iterable)
+	ZEND_PARSE_PARAMETERS_END();
+
+	spl_lazy_iterator_init(return_value, iterable, SPL_LAZY_KEYS);
+}
+/* }}} */
+
+/* {{{ Return a lazy iterator over the values of the iterable, as a list */
+PHP_FUNCTION(iterator_values)
+{
+	zval *iterable;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_ITERABLE(iterable)
+	ZEND_PARSE_PARAMETERS_END();
+
+	spl_lazy_iterator_init(return_value, iterable, SPL_LAZY_VALUES);
+}
+/* }}} */
+
 /* {{{ PHP_MINIT_FUNCTION(spl_iterators) */
 PHP_MINIT_FUNCTION(spl_iterators)
 {
@@ -3520,6 +4195,17 @@ PHP_MINIT_FUNCTION(spl_iterators)
 
 	spl_ce_RecursiveTreeIterator = register_class_RecursiveTreeIterator(spl_ce_RecursiveIteratorIterator);
 	spl_ce_RecursiveTreeIterator->create_object = spl_RecursiveTreeIterator_new;
+
+	spl_ce_LazyIterator = register_class_LazyIterator(zend_ce_iterator);
+	spl_ce_LazyIterator->create_object = spl_lazy_iterator_new;
+	spl_ce_LazyIterator->default_object_handlers = &spl_handlers_lazy_iterator;
+	spl_ce_LazyIterator->get_iterator = spl_lazy_iterator_get_iterator;
+
+	memcpy(&spl_handlers_lazy_iterator, &std_object_handlers, sizeof(zend_object_handlers));
+	spl_handlers_lazy_iterator.offset = offsetof(spl_lazy_iterator, std);
+	spl_handlers_lazy_iterator.free_obj = spl_lazy_iterator_free;
+	spl_handlers_lazy_iterator.get_gc = spl_lazy_iterator_get_gc;
+	spl_handlers_lazy_iterator.clone_obj = NULL;
 
 	return SUCCESS;
 }

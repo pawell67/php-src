@@ -142,6 +142,32 @@ PHP 8.7 UPGRADE NOTES
   . Added Spoofchecker::getRestrictionLevel() to retrieve the configured
     restriction level as one of the Spoofchecker restriction level constants.
 
+- SPL:
+  . Added iterable counterparts of array_* functions. They accept any
+    iterable (array|Traversable) and pass the same callback arguments as
+    their array_* counterparts.
+    Lazy functions return a LazyIterator, preserve keys (iterator_keys() and
+    iterator_values() produce lists) and never pull more entries from the
+    source than needed:
+      iterator_map(iterable $iterator, callable $callback): Iterator
+      iterator_filter(iterable $iterator, ?callable $callback = null,
+                      int $mode = ARRAY_FILTER_USE_VALUE): Iterator
+      iterator_slice(iterable $iterator, int $offset,
+                     ?int $length = null): Iterator
+      iterator_keys(iterable $iterator): Iterator
+      iterator_values(iterable $iterator): Iterator
+    Unlike array_slice(), iterator_slice() always preserves keys and throws a
+    ValueError for a negative $offset or $length.
+    Terminal functions consume the source, stopping as soon as the result is
+    known:
+      iterator_reduce(iterable $iterator, callable $callback,
+                      mixed $initial = null): mixed
+      iterator_any(iterable $iterator, callable $callback): bool
+      iterator_all(iterable $iterator, callable $callback): bool
+      iterator_find(iterable $iterator, callable $callback): mixed
+      iterator_find_key(iterable $iterator, callable $callback): mixed
+      iterator_first(iterable $iterator): mixed
+
 ========================================
 7. New Classes and Interfaces
 ========================================
@@ -161,6 +187,14 @@ PHP 8.7 UPGRADE NOTES
     IntlNumberFormatter::createFromSkeleton() rejects a scale/ option in
     exponent notation, e.g. "scale/1e3".
     It is supported from icu 63.
+
+- SPL:
+  . LazyIterator, the final class of the iterators returned by iterator_map(),
+    iterator_filter(), iterator_slice(), iterator_keys() and
+    iterator_values(). It cannot be instantiated directly, cloned or
+    serialized. Like a generator, it does not touch its source before it is
+    first used, can only be rewound before it was advanced, and releases its
+    source once the iteration has ended.
 
 ========================================
 8. Removed Extensions and SAPIs

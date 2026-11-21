@@ -1,5 +1,5 @@
 /* This is a generated file, edit php_spl.stub.php instead.
- * Stub hash: 4a6f0503f40e6a02636aac8366910b51b9699ab0 */
+ * Stub hash: b8e43538906855984046991e2ababf657f100fea */
 
 #include "zend_attributes.h"
 
@@ -63,6 +63,29 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_iterator_to_array, 0, 1, IS_ARRA
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, preserve_keys, _IS_BOOL, 0, "true")
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_iterator_map, 0, 2, Iterator, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, iterator, Traversable, MAY_BE_ARRAY, NULL)
+	ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_iterator_filter, 0, 1, Iterator, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, iterator, Traversable, MAY_BE_ARRAY, NULL)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, callback, IS_CALLABLE, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, mode, IS_LONG, 0, "ARRAY_FILTER_USE_VALUE")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_iterator_slice, 0, 2, Iterator, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, iterator, Traversable, MAY_BE_ARRAY, NULL)
+	ZEND_ARG_TYPE_INFO(0, offset, IS_LONG, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, length, IS_LONG, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_iterator_keys, 0, 1, Iterator, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, iterator, Traversable, MAY_BE_ARRAY, NULL)
+ZEND_END_ARG_INFO()
+
+#define arginfo_iterator_values arginfo_iterator_keys
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_iterator_reduce, 0, 2, IS_MIXED, 0)
 	ZEND_ARG_OBJ_TYPE_MASK(0, iterator, Traversable, MAY_BE_ARRAY, NULL)
 	ZEND_ARG_TYPE_INFO(0, callback, IS_CALLABLE, 0)
@@ -102,6 +125,11 @@ ZEND_FUNCTION(spl_object_id);
 ZEND_FUNCTION(iterator_apply);
 ZEND_FUNCTION(iterator_count);
 ZEND_FUNCTION(iterator_to_array);
+ZEND_FUNCTION(iterator_map);
+ZEND_FUNCTION(iterator_filter);
+ZEND_FUNCTION(iterator_slice);
+ZEND_FUNCTION(iterator_keys);
+ZEND_FUNCTION(iterator_values);
 ZEND_FUNCTION(iterator_reduce);
 ZEND_FUNCTION(iterator_any);
 ZEND_FUNCTION(iterator_all);
@@ -125,6 +153,11 @@ static const zend_function_entry ext_functions[] = {
 	ZEND_FE(iterator_apply, arginfo_iterator_apply)
 	ZEND_FE(iterator_count, arginfo_iterator_count)
 	ZEND_FE(iterator_to_array, arginfo_iterator_to_array)
+	ZEND_FE(iterator_map, arginfo_iterator_map)
+	ZEND_FE(iterator_filter, arginfo_iterator_filter)
+	ZEND_FE(iterator_slice, arginfo_iterator_slice)
+	ZEND_FE(iterator_keys, arginfo_iterator_keys)
+	ZEND_FE(iterator_values, arginfo_iterator_values)
 	ZEND_FE(iterator_reduce, arginfo_iterator_reduce)
 	ZEND_FE(iterator_any, arginfo_iterator_any)
 	ZEND_FE(iterator_all, arginfo_iterator_all)

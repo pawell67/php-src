@@ -22,6 +22,7 @@ extern PHPAPI zend_class_entry *spl_ce_CachingIterator;
 extern PHPAPI zend_class_entry *spl_ce_CallbackFilterIterator;
 extern PHPAPI zend_class_entry *spl_ce_EmptyIterator;
 extern PHPAPI zend_class_entry *spl_ce_FilterIterator;
+extern PHPAPI zend_class_entry *spl_ce_LazyIterator;
 extern PHPAPI zend_class_entry *spl_ce_InfiniteIterator;
 extern PHPAPI zend_class_entry *spl_ce_IteratorIterator;
 extern PHPAPI zend_class_entry *spl_ce_LimitIterator;
